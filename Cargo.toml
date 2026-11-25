@@ -1,3 +1,8 @@
+[workspace]
+members = ["crates/streamtube-core", "."]
+default-members = ["crates/streamtube-core"]
+resolver = "2"
+
 [package]
 name = "streamtube"
 version = "0.7.5-alpha"
@@ -6,6 +11,7 @@ description = "A YouTube desktop client in Rust + GPUI with SponsorBlock, DeArro
 license = "MIT"
 
 [dependencies]
+streamtube-core = { path = "crates/streamtube-core" }
 gpui-kit = "0.10"
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }

@@ -301,7 +301,7 @@ fn load_settings() -> Settings {
 }
 
 /// Builds settings from stored JSON, keeping every field that parses.
-pub(crate) fn settings_from_value(raw: serde_json::Value) -> Settings {
+pub fn settings_from_value(raw: serde_json::Value) -> Settings {
     if let Ok(s) = serde_json::from_value::<Settings>(raw.clone()) {
         return s;
     }
@@ -392,9 +392,26 @@ fn make_private(dir: &std::path::Path) {
 #[cfg(not(unix))]
 fn make_private(_dir: &std::path::Path) {}
 
+static CUSTOM_DATA_DIR: OnceLock<PathBuf> = OnceLock::new();
+
+/// Initializes StreamTube's storage in an explicit directory (used on iOS for Application Support).
+pub fn init_with_dir(dir: PathBuf) {
+    let _ = std::fs::create_dir_all(&dir);
+    make_private(&dir);
+    if !dir.join("streamtube.db").exists() {
+        let _ = std::fs::remove_file(dir.join("streamtube.db-wal"));
+        let _ = std::fs::remove_file(dir.join("streamtube.db-shm"));
+    }
+    let _ = CUSTOM_DATA_DIR.set(dir);
+    init();
+}
+
 pub fn data_dir() -> PathBuf {
     static DIR: OnceLock<PathBuf> = OnceLock::new();
     DIR.get_or_init(|| {
+        if let Some(d) = CUSTOM_DATA_DIR.get() {
+            return d.clone();
+        }
         // a separate profile (portable use, clean test runs)
         if let Some(d) = std::env::var_os("STREAMTUBE_DATA_DIR").filter(|d| !d.is_empty()) {
             let d = PathBuf::from(d);

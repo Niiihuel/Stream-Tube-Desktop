@@ -1,5 +1,5 @@
 //! Keep the opening media for the next Shorts in memory until playback uses it.
-use super::proxy;
+use crate::proxy;
 use crate::api::{streams, types::VideoItem};
 use parking_lot::Mutex;
 use std::collections::HashMap;
@@ -16,7 +16,7 @@ const PER_SHORT_LIMIT: usize = 8 * 1024 * 1024;
 const MAX_ATTEMPTS: u8 = 2;
 
 #[derive(Clone)]
-pub(super) struct Media {
+pub(crate) struct Media {
     pub bytes: Arc<[u8]>,
     pub total: u64,
     pub mime: String,
@@ -26,7 +26,7 @@ pub(super) struct Media {
 }
 
 impl Media {
-    pub(super) fn record_served(&self, bytes: u64) {
+    pub(crate) fn record_served(&self, bytes: u64) {
         self.served.fetch_add(bytes, Ordering::Relaxed);
     }
 }
@@ -65,7 +65,7 @@ impl Preloads {
     }
 }
 
-pub(super) fn suspend() {
+pub fn suspend() {
     if let Some(state) = STATE.get() {
         state.lock().ready = false;
     }
@@ -137,7 +137,7 @@ pub fn update(feed: &[VideoItem], quality: u32, audio_only: bool, ready: bool) {
     });
 }
 
-pub(super) fn cached(url: &str) -> Option<Media> {
+pub(crate) fn cached(url: &str) -> Option<Media> {
     STATE
         .get()?
         .lock()
@@ -147,7 +147,7 @@ pub(super) fn cached(url: &str) -> Option<Media> {
 }
 
 /// Counts media bytes actually written from this Short's cache to the player.
-pub(super) fn served_bytes(id: &str) -> u64 {
+pub fn served_bytes(id: &str) -> u64 {
     let Some(state) = STATE.get() else { return 0 };
     let state = state.lock();
     state.videos.get(id).map_or(0, |entry| {
@@ -334,7 +334,7 @@ fn rendition_uris(selected: &str) -> impl Iterator<Item = String> + '_ {
 }
 
 /// Use the shortest verified opening among the audio and video renditions mpv will request.
-pub(super) fn hls_opening_seconds(url: &str, quality: u32, audio: Option<&str>) -> Option<f64> {
+pub fn hls_opening_seconds(url: &str, quality: u32, audio: Option<&str>) -> Option<f64> {
     let master = cached(url)?;
     if let Some(seconds) = master.opening_seconds {
         return Some(seconds);

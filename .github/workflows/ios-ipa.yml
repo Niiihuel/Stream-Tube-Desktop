@@ -1,0 +1,64 @@
+name: Build iOS IPA
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "crates/streamtube-core/**"
+      - "ios/**"
+      - "scripts/build-ios.sh"
+      - ".github/workflows/ios-ipa.yml"
+
+jobs:
+  build-ipa:
+    name: Build Unsigned iOS IPA (AltStore / SideStore / Sideloadly)
+    runs-on: macos-15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain & iOS targets
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios,aarch64-apple-ios-sim
+
+      - name: Cache Cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Build Rust XCFramework, UniFFI Swift bindings & Xcode project
+        run: |
+          chmod +x scripts/build-ios.sh
+          ./scripts/build-ios.sh
+
+      - name: Compile iOS App Archive (Unsigned)
+        working-directory: ios
+        run: |
+          xcodebuild clean build \
+            -project StreamTube.xcodeproj \
+            -scheme StreamTube \
+            -configuration Release \
+            -sdk iphoneos \
+            -derivedDataPath build \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO
+
+      - name: Package StreamTube.ipa
+        working-directory: ios
+        run: |
+          mkdir -p Payload
+          cp -R build/Build/Products/Release-iphoneos/StreamTube.app Payload/
+          zip -r9 StreamTube-iOS.ipa Payload
+
+      - name: Upload IPA Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: StreamTube-iOS-IPA
+          path: ios/StreamTube-iOS.ipa
+          if-no-files-found: error

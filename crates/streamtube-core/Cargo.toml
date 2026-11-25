@@ -1,0 +1,37 @@
+[package]
+name = "streamtube-core"
+version = "0.7.5-alpha"
+edition = "2024"
+description = "Core Rust library for Stream Tube (Innertube API, HLS stream proxy, SponsorBlock, DeArrow, RYD, SQLite store & UniFFI bindings)"
+license = "MIT"
+
+[lib]
+name = "streamtube_core"
+crate-type = ["lib", "staticlib", "cdylib"]
+
+[features]
+default = []
+cli = ["uniffi/cli"]
+
+[[bin]]
+name = "uniffi-bindgen"
+path = "src/bin/uniffi-bindgen.rs"
+required-features = ["cli"]
+
+[dependencies]
+anyhow = "1"
+base64 = "0.22"
+chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
+dirs = "6"
+futures = "0.3"
+parking_lot = "0.12"
+rand = "0.9"
+rusqlite = { version = "0.43", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha1 = "0.11"
+sha2 = "0.11"
+thiserror = "2"
+uniffi = { version = "0.29" }
+ureq = { version = "3", features = ["json", "socks-proxy"] }
+url = "2"

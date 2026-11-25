@@ -3,5 +3,4 @@ pub mod controller;
 pub mod mpv;
 pub mod view;
 pub mod preview;
-pub mod proxy;
-pub mod shorts_preload;
+pub use streamtube_core::{proxy, shorts_preload};

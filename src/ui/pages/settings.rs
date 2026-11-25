@@ -192,7 +192,7 @@ impl SettingsPage {
 /// Applies a changed setting to the running app (theme, palette, current playback).
 fn after_change(id: &str, window: &mut Window, cx: &mut App) {
     if id == "app-language" {
-        crate::i18n::apply_component_locale();
+        gpui_kit::component::set_locale(crate::i18n::language().code());
         window.set_window_title(&format!("{} - Stream Tube", t("Settings")));
     } else {
         apply_theme(Some(window), cx);

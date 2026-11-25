@@ -203,7 +203,13 @@ pub fn browse_continue(token: &str) -> Result<crate::api::types::Page> {
 
 // ───────────── sign-in through a browser ─────────────
 
+/// Connects a map of youtube.com cookies (e.g. from iOS WKWebView cookie store).
+pub fn connect_cookies(cookies: BTreeMap<String, String>) -> Result<String> {
+    connect(cookies)
+}
+
 /// Chromium-based browsers the sign-in can use, most likely first.
+#[cfg(not(target_os = "ios"))]
 fn find_browser() -> Option<(String, PathBuf)> {
     #[cfg(windows)]
     {
@@ -249,19 +255,33 @@ fn find_browser() -> Option<(String, PathBuf)> {
 }
 
 /// Name of the browser the sign-in will open, if there is one.
+#[cfg(not(target_os = "ios"))]
 pub fn browser_name() -> Option<String> {
     find_browser().map(|(n, _)| n)
+}
+
+#[cfg(target_os = "ios")]
+pub fn browser_name() -> Option<String> {
+    None
+}
+
+#[cfg(target_os = "ios")]
+pub fn browser_sign_in(_cancel: Arc<AtomicBool>) -> Result<String> {
+    let _ = (SIGN_IN_URL, Ordering::Relaxed, Duration::from_secs(0));
+    Err(anyhow!("Desktop browser sign-in is not available on iOS; use device code sign-in or cookie import."))
 }
 
 /// The sign-in browser's DevTools connection. It runs over a pair of pipes that
 /// only this process holds (`--remote-debugging-pipe`), not a loopback port that
 /// any local process could connect to and read the fresh Google cookies from.
+#[cfg(not(target_os = "ios"))]
 struct Cdp {
     to_browser: std::io::PipeWriter,
     replies: mpsc::Receiver<Value>,
     next_id: i64,
 }
 
+#[cfg(not(target_os = "ios"))]
 impl Cdp {
     /// Adds the pipe flags to the browser's command line. Call `spawn` on the
     /// command, then `Cdp::started` with what this returns.
@@ -373,8 +393,10 @@ impl Cdp {
 
 /// The browser's ends of the pipes. Dropped once it has started, so that only the
 /// browser holds them.
+#[cfg(not(target_os = "ios"))]
 struct ChildEnds(#[allow(dead_code)] std::io::PipeReader, #[allow(dead_code)] std::io::PipeWriter);
 
+#[cfg(not(target_os = "ios"))]
 fn youtube_cookies(list: &[Value]) -> BTreeMap<String, String> {
     let mut out = BTreeMap::new();
     for c in list {
@@ -391,6 +413,7 @@ fn youtube_cookies(list: &[Value]) -> BTreeMap<String, String> {
 
 /// Opens a browser window for the user to sign in to YouTube and waits until they
 /// have. Returns the account name. `cancel` stops waiting and closes the browser.
+#[cfg(not(target_os = "ios"))]
 pub fn browser_sign_in(cancel: Arc<AtomicBool>) -> Result<String> {
     let (_, exe) = find_browser().ok_or_else(|| {
         anyhow!("No supported browser found. Install Google Chrome, Microsoft Edge, Brave or Chromium, or import a cookies.txt file instead.")
@@ -712,7 +735,7 @@ mod host_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_os = "ios")))]
 mod devtools_pipe_tests {
     /// Starts the real browser (headless) and talks to it over the private pipes.
     #[test]

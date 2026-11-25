@@ -323,9 +323,9 @@ fn hls_client(video_id: &str, c: HlsClient) -> Result<StreamInfo> {
 fn hls_variants(video_id: &str, master_url: &str, vod: bool) -> Result<(Vec<StreamFormat>, Vec<StreamFormat>, Option<String>)> {
     let text = http::get_text(master_url)?;
     if vod && text.contains("#EXT-X-STREAM-INF:") {
-        crate::player::proxy::remember_vod_playlist(master_url, text.as_str().into());
+        crate::proxy::remember_vod_playlist(master_url, text.as_str().into());
     }
-    crate::player::shorts_preload::remember_master(video_id, master_url, &text);
+    crate::shorts_preload::remember_master(video_id, master_url, &text);
     let attr = |l: &str, k: &str| -> Option<String> {
         let rest = l.split(&format!("{k}=")).nth(1)?;
         Some(if let Some(q) = rest.strip_prefix('"') { q.split('"').next()?.to_string() } else { rest.split(',').next()?.to_string() })
@@ -763,6 +763,54 @@ pub fn ytdlp_path() -> Option<String> {
     found
 }
 
+/// yt-dlp extractor arguments for the iOS client, including the formats yt-dlp
+/// would otherwise hold back for lack of a PO token.
+pub const YTDLP_IOS: &str = "youtube:player_client=ios;formats=missing_pot";
+
+/// Whether a failed yt-dlp run is worth retrying through the iOS client.
+pub fn retry_with_ios(err: &str) -> bool {
+    let e = err.to_lowercase();
+    !e.contains("cancelled")
+        && (e.contains("not available")
+            || e.contains("unavailable")
+            || e.contains("requested format")
+            || e.contains("reloaded"))
+}
+
+/// Resolves streams specifically for iOS native AVPlayer playback (no yt-dlp subprocesses).
+/// Prefers Apple HLS manifests (visionOS -> iOS -> Android VR fallback) and caches the result.
+pub fn get_ios_streams(video_id: &str) -> Result<StreamInfo> {
+    if let Some(info) = cache_get(video_id) {
+        return Ok(info);
+    }
+    let lock = inflight_lock(video_id);
+    let _g = lock.lock();
+    if let Some(info) = cache_get(video_id) {
+        return Ok(info);
+    }
+    let info = visionos(video_id)
+        .or_else(|e1| ios(video_id).map_err(|e2| anyhow!("{e1}\n{e2}")))
+        .or_else(|e2| {
+            android_vr(video_id)
+                .and_then(|i| {
+                    if i.hls_url.is_none() && i.muxed.is_empty() && i.video.is_empty() {
+                        Err(anyhow!("Android VR returned no playable formats"))
+                    } else {
+                        Ok(i)
+                    }
+                })
+                .map_err(|e3| anyhow!("{e2}\n{e3}"))
+        })?;
+    cache_put(video_id, &info);
+    Ok(info)
+}
+
+#[cfg(target_os = "ios")]
+fn find_ytdlp(_custom: &str) -> Option<String> {
+    None
+}
+
+#[cfg(not(target_os = "ios"))]
 fn find_ytdlp(custom: &str) -> Option<String> {
     let mut candidates: Vec<String> = Vec::new();
     if !custom.is_empty() {
@@ -807,7 +855,7 @@ pub fn ytdlp_streams(video_id: &str) -> Result<StreamInfo> {
 
 /// Whether YouTube refused an anonymous caller: a bot check, an age check, or
 /// a video only signed-in viewers may see.
-pub(crate) fn verification_requested(error: &str) -> bool {
+pub fn verification_requested(error: &str) -> bool {
     let e = error.to_ascii_lowercase();
     e.contains("not a bot")
         || e.contains("confirm your age")
@@ -863,9 +911,9 @@ fn ytdlp_streams_with(video_id: &str, cookies: Option<&std::path::Path>) -> Resu
     hide_window(&mut cmd);
     let out = cmd.output()?;
     let result = ytdlp_inventory(video_id, &out);
-    if result.is_err() && crate::downloads::retry_with_ios(&String::from_utf8_lossy(&out.stderr)) {
+    if result.is_err() && retry_with_ios(&String::from_utf8_lossy(&out.stderr)) {
         let mut retry = Command::new(cmd.get_program());
-        retry.args(cmd.get_args()).arg("--extractor-args").arg(crate::downloads::YTDLP_IOS);
+        retry.args(cmd.get_args()).arg("--extractor-args").arg(YTDLP_IOS);
         hide_window(&mut retry);
         if let Ok(o) = retry.output() {
             if let Ok(info) = ytdlp_inventory(video_id, &o) {
@@ -1108,7 +1156,7 @@ pub fn playback_stream<'a>(
 pub fn mpv_source(video: Option<&StreamFormat>, audio: Option<&StreamFormat>, duration: u64) -> Option<String> {
     let _ = duration;
     let edl_part = |u: &str| format!("%{}%{}", u.len(), u);
-    let local = |f: &StreamFormat| crate::player::proxy::local_url(&f.url, f.content_length, &f.mime);
+    let local = |f: &StreamFormat| crate::proxy::local_url(&f.url, f.content_length, &f.mime);
     match (video, audio) {
         (Some(v), Some(a)) => Some(format!(
             "edl://!no_clip;!no_chapters;{};!new_stream;!no_clip;!no_chapters;{}",

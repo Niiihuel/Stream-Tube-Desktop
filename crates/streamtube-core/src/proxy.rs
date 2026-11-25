@@ -129,7 +129,23 @@ pub fn local_hls(url: &str, max_height: u32, audio: Option<&str>) -> String {
     playback_hls(url, max_height, audio, false)
 }
 
-pub(super) fn playback_hls(url: &str, max_height: u32, audio: Option<&str>, prefer_avc: bool) -> String {
+/// Serves an HLS master playlist tailored for Apple's native AVPlayer on iOS:
+/// keeps hardware-decoded Apple codecs (H.264 `avc1`, HEVC `hvc1`/`hev1`, AAC `mp4a`),
+/// filters out VP9 (`vp09`) variants that AVPlayer cannot decode in HLS, caps height at
+/// `max_height` (0 = adaptive auto), marks the preferred audio language as `DEFAULT=YES`,
+/// and routes all playlist/segment fetches through the Rust HTTP agent (preventing IPv4/IPv6 403s).
+pub fn ios_hls(url: &str, max_height: u32, audio: Option<&str>) -> String {
+    let Some(p) = proxy() else { return url.to_string() };
+    let id = register(p, url, None, HLS);
+    let mut url = format!("{}/h/{id}.m3u8?max={max_height}&ios=1", p.base());
+    if let Some(audio) = audio {
+        url.push_str("&audio=");
+        url.push_str(&crate::api::http::urlencode(audio));
+    }
+    url
+}
+
+pub fn playback_hls(url: &str, max_height: u32, audio: Option<&str>, prefer_avc: bool) -> String {
     let Some(p) = proxy() else { return url.to_string() };
     let id = register(p, url, None, HLS);
     let mut url = format!("{}/h/{id}.m3u8?max={max_height}", p.base());
@@ -154,7 +170,7 @@ pub fn local_pass(url: &str) -> String {
     format!("{}/p/{id}", p.base())
 }
 
-pub(super) fn hls_attr(line: &str, key: &str) -> Option<String> {
+pub fn hls_attr(line: &str, key: &str) -> Option<String> {
     // match KEY= at an attribute boundary (so AUDIO= doesn't hit "VIDEO-RANGE=..."-like names)
     let mut search = line;
     loop {
@@ -175,7 +191,7 @@ pub(super) fn hls_attr(line: &str, key: &str) -> Option<String> {
 /// `max_height` and the codec preference) plus its default audio rendition.
 /// ffmpeg opens every playlist a master lists before starting, so serving the
 /// full master (often 30+ playlists) delays the start by many seconds.
-pub(super) fn select_master(text: &str, max_height: u32, audio_name: Option<&str>, prefer_avc: bool) -> Option<String> {
+pub fn select_master(text: &str, max_height: u32, audio_name: Option<&str>, prefer_avc: bool) -> Option<String> {
     let lines: Vec<&str> = text.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
     let mut header = Vec::new();
     let mut medias = Vec::new();
@@ -324,7 +340,113 @@ fn rewrite_playlist(p: &Proxy, base: &str, text: &str, max_height: u32) -> Strin
     out
 }
 
-pub(super) fn playlist_url(base: &str, uri: &str) -> Option<String> {
+/// Filters a master playlist for iOS AVPlayer: keeps adaptive Apple-compatible video
+/// variants (H.264 / HEVC, excluding VP9 unless nothing else exists), honors `max_height`,
+/// and sets `DEFAULT=YES,AUTOSELECT=YES` on the desired audio track while keeping other dubs selectable.
+pub fn filter_ios_master(text: &str, max_height: u32, audio_name: Option<&str>) -> Option<String> {
+    let lines: Vec<&str> = text.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+    let mut header = Vec::new();
+    let mut medias: Vec<&str> = Vec::new();
+    let mut variants: Vec<(&str, &str)> = Vec::new();
+    let mut i = 0;
+    while i < lines.len() {
+        let l = lines[i];
+        if l.starts_with("#EXT-X-STREAM-INF") {
+            if let Some(u) = lines.get(i + 1).filter(|u| !u.starts_with('#')) {
+                variants.push((l, u));
+                i += 2;
+                continue;
+            }
+        } else if l.starts_with("#EXT-X-MEDIA") {
+            medias.push(l);
+        } else if l.starts_with("#EXT-X-I-FRAME-STREAM-INF") || !l.starts_with('#') {
+            // skip i-frame playlists
+        } else {
+            header.push(l);
+        }
+        i += 1;
+    }
+    if variants.is_empty() {
+        return None;
+    }
+    let is_vp9 = |l: &str| {
+        let c = hls_attr(l, "CODECS").unwrap_or_default().to_ascii_lowercase();
+        c.contains("vp09") || c.contains("vp9")
+    };
+    let apple_variants: Vec<(&str, &str)> = variants.iter().copied().filter(|(l, _)| !is_vp9(l)).collect();
+    let pool = if apple_variants.is_empty() { variants } else { apple_variants };
+    let class_of = |l: &str| -> u32 {
+        hls_attr(l, "RESOLUTION")
+            .and_then(|r| r.split_once('x').and_then(|(w, h)| Some(crate::api::streams::quality_class(w.parse().ok()?, h.parse().ok()?))))
+            .unwrap_or(0)
+    };
+    let bw_of = |l: &str| hls_attr(l, "BANDWIDTH").and_then(|b| b.parse::<u64>().ok()).unwrap_or(0);
+    let mut selected_variants: Vec<(&str, &str)> = if max_height == 0 {
+        pool.clone()
+    } else {
+        let fits: Vec<(&str, &str)> = pool.iter().copied().filter(|(l, _)| class_of(l) <= max_height).collect();
+        if fits.is_empty() {
+            pool.iter().min_by_key(|(l, _)| (class_of(l), bw_of(l))).into_iter().copied().collect()
+        } else {
+            fits
+        }
+    };
+    // Put highest fitting resolution first so AVPlayer starts crisp immediately
+    selected_variants.sort_by(|(a, _), (b, _)| (class_of(b), bw_of(b)).cmp(&(class_of(a), bw_of(a))));
+
+    let mut out = String::with_capacity(text.len());
+    for h in header {
+        out.push_str(h);
+        out.push('\n');
+    }
+
+    let name_of = |m: &str| crate::api::streams::hls_media_name(m).unwrap_or_default();
+    let chosen_audio_name = audio_name.map(str::to_string).or_else(|| {
+        medias
+            .iter()
+            .filter(|m| hls_attr(m, "TYPE").as_deref() == Some("AUDIO"))
+            .find(|m| {
+                m.contains("acont=original")
+                    || m.contains("acont%3Doriginal")
+                    || crate::api::streams::is_original_audio_label(&name_of(m))
+            })
+            .map(|m| name_of(m))
+            .filter(|n| !n.is_empty())
+    });
+
+    for m in medias {
+        if hls_attr(m, "TYPE").as_deref() == Some("AUDIO") {
+            if let Some(ref want) = chosen_audio_name {
+                let is_match = &name_of(m) == want;
+                let cleaned = m
+                    .replace(",DEFAULT=YES", "")
+                    .replace(",DEFAULT=NO", "")
+                    .replace(",AUTOSELECT=YES", "")
+                    .replace(",AUTOSELECT=NO", "");
+                if is_match {
+                    out.push_str(&cleaned);
+                    out.push_str(",DEFAULT=YES,AUTOSELECT=YES\n");
+                } else {
+                    out.push_str(&cleaned);
+                    out.push_str(",DEFAULT=NO,AUTOSELECT=YES\n");
+                }
+                continue;
+            }
+        }
+        out.push_str(m);
+        out.push('\n');
+    }
+
+    for (inf, uri) in selected_variants {
+        out.push_str(inf);
+        out.push('\n');
+        out.push_str(uri);
+        out.push('\n');
+    }
+    Some(out)
+}
+
+pub fn playlist_url(base: &str, uri: &str) -> Option<String> {
     if uri.starts_with("https://") || uri.starts_with("http://") {
         return Some(uri.to_owned());
     }
@@ -332,10 +454,10 @@ pub(super) fn playlist_url(base: &str, uri: &str) -> Option<String> {
     matches!(resolved.scheme(), "https" | "http").then(|| resolved.into())
 }
 
-fn serve_playlist(conn: &mut TcpStream, p: &Proxy, url: &str, max_height: u32, audio: Option<&str>, prefer_avc: bool) -> std::io::Result<()> {
+fn serve_playlist(conn: &mut TcpStream, p: &Proxy, url: &str, max_height: u32, audio: Option<&str>, prefer_avc: bool, ios_mode: bool) -> std::io::Result<()> {
     let mut text = PLAYLISTS.lock().iter().find(|(key, _)| key == url).map(|(_, text)| text.clone());
     if text.is_none() {
-        text = super::shorts_preload::cached(url)
+        text = crate::shorts_preload::cached(url)
             .and_then(|media| std::str::from_utf8(&media.bytes).ok().map(Arc::from));
     }
     for attempt in 0..3u64 {
@@ -362,7 +484,15 @@ fn serve_playlist(conn: &mut TcpStream, p: &Proxy, url: &str, max_height: u32, a
         conn.write_all(b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")?;
         return Ok(());
     };
-    let selected = text.contains("#EXT-X-STREAM-INF").then(|| select_master(&text, max_height, audio, prefer_avc)).flatten();
+    let selected = if text.contains("#EXT-X-STREAM-INF") {
+        if ios_mode {
+            filter_ios_master(&text, max_height, audio)
+        } else {
+            select_master(&text, max_height, audio, prefer_avc)
+        }
+    } else {
+        None
+    };
     let body = rewrite_playlist(p, url, selected.as_deref().unwrap_or(&text), max_height);
     let head = format!(
         "HTTP/1.1 200 OK\r\nContent-Type: application/vnd.apple.mpegurl\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
@@ -375,7 +505,7 @@ fn serve_playlist(conn: &mut TcpStream, p: &Proxy, url: &str, max_height: u32, a
 
 /// Plain pass-through (HLS segments): forwards the request and streams the reply.
 fn serve_pass(conn: &mut TcpStream, url: &str, range: Option<(u64, Option<u64>)>, head_only: bool) -> std::io::Result<()> {
-    if let Some(media) = super::shorts_preload::cached(url) {
+    if let Some(media) = crate::shorts_preload::cached(url) {
         let total = media.total;
         let (start, end) = range.unwrap_or((0, None));
         let end = end.unwrap_or(total - 1).min(total - 1);
@@ -467,7 +597,7 @@ fn serve_pass(conn: &mut TcpStream, url: &str, range: Option<(u64, Option<u64>)>
     conn.flush()
 }
 
-pub(super) fn agent() -> ureq::Agent {
+pub fn agent() -> ureq::Agent {
     static AGENT: crate::api::http::NetworkAgent = crate::api::http::NetworkAgent::new();
     AGENT.get(&crate::store::settings_snapshot(), |builder| {
         builder
@@ -526,7 +656,7 @@ fn serve(mut conn: TcpStream) -> std::io::Result<()> {
         let max = param("max").and_then(|m| m.parse().ok()).unwrap_or(0);
         let audio = param("audio").map(crate::api::http::urldecode);
         return match lookup(rest) {
-            Some(url) => serve_playlist(&mut conn, p, &url, max, audio.as_deref(), param("avc") == Some("1")),
+            Some(url) => serve_playlist(&mut conn, p, &url, max, audio.as_deref(), param("avc") == Some("1"), param("ios") == Some("1")),
             None => conn.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"),
         };
     }
@@ -542,7 +672,7 @@ fn serve(mut conn: TcpStream) -> std::io::Result<()> {
         conn.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")?;
         return Ok(());
     };
-    let cached = super::shorts_preload::cached(&url);
+    let cached = crate::shorts_preload::cached(&url);
     if len.is_none() {
         len = cached.as_ref().map(|m| m.total).or_else(|| probe_len(&url));
         if let (Some(id), Some(l)) = (id, len) {

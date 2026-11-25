@@ -4,30 +4,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::time::Duration;
 
-/// Turns a `streamtube:` link back into the YouTube URL it wraps.
-/// Accepts `streamtube://open?url=<encoded>`, `streamtube:https://…` and
-/// `streamtube://www.youtube.com/watch?v=…`; anything else is returned unchanged.
-pub fn normalize(arg: &str) -> String {
-    let a = arg.trim().trim_matches('"');
-    let Some(rest) = a.strip_prefix("streamtube:").or_else(|| a.strip_prefix("STREAMTUBE:")) else {
-        return a.to_string();
-    };
-    let rest = rest.trim_start_matches('/');
-    if let Some(q) = rest.strip_prefix("open?").or_else(|| rest.strip_prefix("open/?")) {
-        if let Some(u) = q.split('&').find_map(|kv| kv.strip_prefix("url=")) {
-            return crate::api::http::urldecode(u);
-        }
-        if let Some(v) = q.split('&').find_map(|kv| kv.strip_prefix("v=")) {
-            return format!("https://www.youtube.com/watch?v={v}");
-        }
-    }
-    if rest.starts_with("http:") || rest.starts_with("https:") {
-        // "https:/www…" when a browser collapsed the slashes
-        let (scheme, tail) = rest.split_once(':').unwrap_or(("https", ""));
-        return format!("{scheme}://{}", tail.trim_start_matches('/'));
-    }
-    format!("https://{rest}")
-}
+pub use streamtube_core::url_util::normalize;
 
 fn port_file() -> std::path::PathBuf {
     crate::store::data_dir().join("instance")
